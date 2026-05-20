@@ -1,4 +1,4 @@
-const API = '/api';
+const API = 'https://chatbot.liquidmatics.co.tz/api';
 
 export async function postChat(sessionId, message) {
   const r = await fetch(`${API}/chat`, {
