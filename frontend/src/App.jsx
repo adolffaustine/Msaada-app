@@ -4,6 +4,7 @@ import { postChat, getHistory, postReset } from './api.js';
 
 const SESSION_KEY = 'msaada_session_v1';
 
+
 function getOrCreateSessionId() {
   let sid = localStorage.getItem(SESSION_KEY);
   if (!sid) {
