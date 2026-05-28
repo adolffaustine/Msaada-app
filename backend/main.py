@@ -53,12 +53,14 @@ def _tool_handler(name: str, args: dict, card: dict) -> dict:
             ip_address=args.get("ipAddress"),
         )
         summary, chart = summarize_diagnosis(raw, capacity_mbps=args.get("capacityMbps"))
-        card["chart"] = {
-            "interface": args.get("interfaceName") or args.get("ipAddress"),
-            "capacity_mbps": args.get("capacityMbps"),
-            "sent_mbps": chart["sent_mbps"],
-            "recv_mbps": chart["recv_mbps"],
-        }
+        link_type = (args.get("linkType") or "").upper()
+        if link_type not in ("FTTH", "GPON"):
+            card["chart"] = {
+                "interface": args.get("interfaceName") or args.get("ipAddress"),
+                "capacity_mbps": args.get("capacityMbps"),
+                "sent_mbps": chart["sent_mbps"],
+                "recv_mbps": chart["recv_mbps"],
+            }
         return summary
 
     if name == "log_ticket":
@@ -103,6 +105,27 @@ def _tool_handler(name: str, args: dict, card: dict) -> dict:
     return {"error": f"unknown tool {name}"}
 
 
+def _trim_history(history, max_messages: int = 50) -> list:
+    """Slice history to max_messages and drop any leading tool_result messages.
+
+    Anthropic requires every tool_result block to be preceded by an assistant
+    message containing the matching tool_use block.  A naive [-50:] slice can
+    cut off the tool_use while keeping the tool_result, causing a 400 error.
+    """
+    h = history[-max_messages:]
+    while h:
+        first = h[0]
+        content = first.get("content")
+        # A user message whose content is a list of tool_result blocks has no
+        # matching tool_use above it after the slice — drop it.
+        if first.get("role") == "user" and isinstance(content, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                h = h[1:]
+                continue
+        break
+    return h
+
+
 @app.post("/api/chat")
 async def api_chat(req: Request):
     body = await req.json()
@@ -114,7 +137,7 @@ async def api_chat(req: Request):
     sess = get_session(sid)
     try:
         reply, history, card = await run_turn(sess["history"], message, _tool_handler)
-        sess["history"] = history[-50:]
+        sess["history"] = _trim_history(history)
         sess["lastSeen"] = int(time.time())
         save_session(sid, sess)
         return {"sessionId": sid, "reply": reply, "card": card}
@@ -171,7 +194,7 @@ async def api_chat_stream(req: Request):
         if "error" in result:
             yield f"data: {json.dumps({'type': 'error', 'message': result['error']})}\n\n"
         else:
-            sess["history"] = result["history"][-50:]
+            sess["history"] = _trim_history(result["history"])
             sess["lastSeen"] = int(time.time())
             save_session(sid, sess)
             yield f"data: {json.dumps({'type': 'done', 'sessionId': sid, 'reply': result['reply'], 'card': result['card']})}\n\n"
