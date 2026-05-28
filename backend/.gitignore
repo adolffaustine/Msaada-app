@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
+.env
+.env.*
+
+# Data / sessions (runtime files)
+data/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

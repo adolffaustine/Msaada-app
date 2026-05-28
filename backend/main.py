@@ -2,9 +2,10 @@
 import os, json, time, uuid
 from pathlib import Path
 from typing import Optional
+import asyncio
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 # from ollama_chat import run_turn
 from claude_chat import run_turn,visible_history
@@ -112,7 +113,7 @@ async def api_chat(req: Request):
 
     sess = get_session(sid)
     try:
-        reply, history, card = run_turn(sess["history"], message, _tool_handler)
+        reply, history, card = await run_turn(sess["history"], message, _tool_handler)
         sess["history"] = history[-50:]
         sess["lastSeen"] = int(time.time())
         save_session(sid, sess)
@@ -120,6 +121,66 @@ async def api_chat(req: Request):
     except Exception as e:
         print("chat error:", e)
         raise HTTPException(500, str(e))
+
+
+_TOOL_STATUS = {
+    "search_customer": "Searching for your account...",
+    "run_diagnosis": "Running live diagnosis on your link — please wait...",
+    "log_ticket": "Logging your support ticket...",
+    "recall_similar_cases": "Checking similar past cases...",
+}
+
+
+@app.post("/api/chat/stream")
+async def api_chat_stream(req: Request):
+    body = await req.json()
+    sid = body.get("sessionId") or str(uuid.uuid4())
+    message = (body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(400, "empty message")
+
+    sess = get_session(sid)
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+
+    async def _streaming_tool_handler(name: str, args: dict, card: dict) -> dict:
+        if name in _TOOL_STATUS:
+            await queue.put({"type": "status", "text": _TOOL_STATUS[name]})
+        return await asyncio.to_thread(_tool_handler, name, args, card)
+
+    result: dict = {}
+
+    async def _run():
+        try:
+            reply, history, card = await run_turn(sess["history"], message, _streaming_tool_handler)
+            result.update(reply=reply, history=history, card=card)
+        except Exception as e:
+            result["error"] = str(e)
+            print("chat stream error:", e)
+        finally:
+            await queue.put(_DONE)
+
+    async def generate():
+        asyncio.create_task(_run())
+        while True:
+            event = await queue.get()
+            if event is _DONE:
+                break
+            yield f"data: {json.dumps(event)}\n\n"
+
+        if "error" in result:
+            yield f"data: {json.dumps({'type': 'error', 'message': result['error']})}\n\n"
+        else:
+            sess["history"] = result["history"][-50:]
+            sess["lastSeen"] = int(time.time())
+            save_session(sid, sess)
+            yield f"data: {json.dumps({'type': 'done', 'sessionId': sid, 'reply': result['reply'], 'card': result['card']})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/history")

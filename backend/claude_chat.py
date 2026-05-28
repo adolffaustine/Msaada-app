@@ -1,14 +1,14 @@
 """Anthropic Claude chat orchestration with tool use."""
 import os
 import json
-from anthropic import Anthropic
-from dotenv import load_dotenv  # 1. Import the loader
+import asyncio
+import inspect
+from anthropic import AsyncAnthropic
+from dotenv import load_dotenv
 
-# 2. Load the environment variables from the .env file
-load_dotenv() 
+load_dotenv()
 
-# 3. Now os.environ will successfully find your key
-client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 SYSTEM_PROMPT = """You are **Msaada** (Swahili for "help"), the AI NOC assistant for Liquid Technologies in Tanzania. You speak directly with customers about their internet connectivity. Calm, factual, action-oriented.
@@ -170,12 +170,12 @@ def visible_history(history):
     return out
 
 
-def run_turn(history, user_message, tool_handler, max_iters=8):
-    """Run one chat turn. Returns (reply_text, new_history, card).
+async def run_turn(history, user_message, tool_handler, max_iters=8):
+    """Run one async chat turn. Returns (reply_text, new_history, card).
 
+    tool_handler may be sync or async — both are handled transparently.
     history is a list of {"role": "user"|"assistant", "content": str|list} messages
-    stored in Anthropic's native format. Tool calls/results live inside the
-    assistant/user content blocks, so persistence stays lossless across turns.
+    stored in Anthropic's native format.
     """
     messages = []
     for m in history or []:
@@ -186,7 +186,7 @@ def run_turn(history, user_message, tool_handler, max_iters=8):
     card = {"chart": None, "ticket": None}
 
     for _ in range(max_iters):
-        resp = client.messages.create(
+        resp = await client.messages.create(
             model=MODEL,
             max_tokens=2048,
             system=SYSTEM_PROMPT,
@@ -211,7 +211,10 @@ def run_turn(history, user_message, tool_handler, max_iters=8):
             name = block.get("name", "")
             args = block.get("input") or {}
             try:
-                result = tool_handler(name, args, card)
+                if inspect.iscoroutinefunction(tool_handler):
+                    result = await tool_handler(name, args, card)
+                else:
+                    result = await asyncio.to_thread(tool_handler, name, args, card)
             except Exception as e:
                 result = {"error": str(e)}
             content_str = json.dumps(result)

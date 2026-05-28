@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as echarts from 'echarts';
-import { postChat, getHistory, postReset } from './api.js';
+import { streamChat, getHistory, postReset } from './api.js';
 
 const SESSION_KEY = 'msaada_session_v1';
 
@@ -54,29 +54,16 @@ function ChartCard({ chart }) {
       },
     });
     c.setOption({
-  // FIX 1: Adjust grid properties to give the labels proper container padding
-  grid: { 
-    left: '10%',   // Dynamic percentage scales perfectly regardless of digits
-    right: '4%', 
-    top: 40, 
-    bottom: 30,
-    containLabel: true // Forces ECharts to calculate labels safely inside the grid box!
-  },
-  legend: { top: 0, textStyle: { color: '#3d4a5c', fontSize: 11 } },
-  tooltip: { trigger: 'axis', valueFormatter: v => (v ?? 0).toFixed(2) + ' Mbps' },
-  xAxis: { type: 'time', axisLabel: { color: '#6b7a90', fontSize: 10 } },
-  yAxis: { 
-    type: 'value', 
-    name: 'Mbps', 
-    axisLabel: { 
-      color: '#6b7a90', 
-      fontSize: 10,
-      // FIX 2: Restrict the text area from causing wide container layout shifts
-      overflow: 'truncate' 
-    } 
-  },
-  series,
-});
+      grid: { left: '10%', right: '4%', top: 40, bottom: 30, containLabel: true },
+      legend: { top: 0, textStyle: { color: '#334155', fontSize: 11 } },
+      tooltip: { trigger: 'axis', valueFormatter: v => (v ?? 0).toFixed(2) + ' Mbps' },
+      xAxis: { type: 'time', axisLabel: { color: '#64748b', fontSize: 10 } },
+      yAxis: {
+        type: 'value', name: 'Mbps',
+        axisLabel: { color: '#64748b', fontSize: 10, overflow: 'truncate' },
+      },
+      series,
+    });
     const onResize = () => c.resize();
     window.addEventListener('resize', onResize);
     return () => { window.removeEventListener('resize', onResize); c.dispose(); };
@@ -94,13 +81,15 @@ function ChartCard({ chart }) {
 }
 
 function TicketCard({ ticket }) {
+  const sev = ticket.severity || 'medium';
   return (
     <div className="ticket-card">
       <div className="ticket-head">
-        <span className="ticket-title">Ticket logged</span>
-        <span className="ticket-sev">{ticket.severity || 'medium'}</span>
+        <span className="ticket-icon">🎫</span>
+        <span className="ticket-title">Support ticket logged</span>
+        <span className={`ticket-sev ${sev}`}>{sev}</span>
       </div>
-      <div className="ticket-ref">Reference: <span className="mono">{ticket.id}</span></div>
+      <div className="ticket-ref">Reference: <span className="mono">#{ticket.id}</span></div>
       <div className="ticket-hint">Our team will follow up with you shortly.</div>
     </div>
   );
@@ -111,6 +100,7 @@ export default function App() {
   const [items, setItems] = useState([]);
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
+  const [status, setStatus] = useState('');
   const [voiceOn, setVoiceOn] = useState(() => localStorage.getItem('msaada_voice') !== 'off');
   const [listening, setListening] = useState(false);
   const recogRef = useRef(null);
@@ -170,19 +160,31 @@ export default function App() {
     setItems(it => [...it, { kind: 'bubble', role: 'user', text }]);
     setInput('');
     setTyping(true);
+    setStatus('');
     try {
-      const data = await postChat(sessionId, text);
-      setSessionId(data.sessionId || sessionId);
-      localStorage.setItem(SESSION_KEY, data.sessionId || sessionId);
-      setTyping(false);
-      const next = [];
-      if (data.reply) next.push({ kind: 'bubble', role: 'bot', text: data.reply });
-      if (data.card?.chart) next.push({ kind: 'chart', chart: data.card.chart });
-      if (data.card?.ticket) next.push({ kind: 'ticket', ticket: data.card.ticket });
-      setItems(it => [...it, ...next]);
-      speak(data.reply);
+      for await (const event of streamChat(sessionId, text)) {
+        if (event.type === 'status') {
+          setStatus(event.text);
+        } else if (event.type === 'done') {
+          setSessionId(event.sessionId || sessionId);
+          localStorage.setItem(SESSION_KEY, event.sessionId || sessionId);
+          setTyping(false);
+          setStatus('');
+          const next = [];
+          if (event.reply) next.push({ kind: 'bubble', role: 'bot', text: event.reply });
+          if (event.card?.chart) next.push({ kind: 'chart', chart: event.card.chart });
+          if (event.card?.ticket) next.push({ kind: 'ticket', ticket: event.card.ticket });
+          setItems(it => [...it, ...next]);
+          speak(event.reply);
+        } else if (event.type === 'error') {
+          setTyping(false);
+          setStatus('');
+          setItems(it => [...it, { kind: 'bubble', role: 'bot', text: "Connection problem — please try again." }]);
+        }
+      }
     } catch {
       setTyping(false);
+      setStatus('');
       setItems(it => [...it, { kind: 'bubble', role: 'bot', text: "Connection problem — please try again." }]);
     }
   };
@@ -219,35 +221,43 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <div className="logo" />
-          <div>
-            <div className="brand-title">Msaada</div>
-            <div className="brand-sub">Liquid Technologies — connectivity support</div>
+          <div className="logo">🛰️</div>
+          <div className="brand-text">
+            <span className="brand-title">Msaada</span>
+            <span className="brand-sub">Liquid Technologies — connectivity support</span>
           </div>
+          <div className="online-dot" title="Online" />
         </div>
         <div className="topbar-actions">
-          <button className="pill" onClick={toggleVoice}>Voice: {voiceOn ? 'on' : 'off'}</button>
-          <button className="pill" onClick={newChat}>New chat</button>
+          <button className={'pill' + (voiceOn ? ' active' : '')} onClick={toggleVoice}>
+            {voiceOn ? '🔊' : '🔇'} Voice
+          </button>
+          <button className="pill" onClick={newChat}>＋ New chat</button>
         </div>
       </header>
 
       <main className="messages">
         {items.map((it, i) => {
-          if (it.kind === 'chart') return <ChartCard key={i} chart={it.chart} />;
+          if (it.kind === 'chart')  return <ChartCard  key={i} chart={it.chart} />;
           if (it.kind === 'ticket') return <TicketCard key={i} ticket={it.ticket} />;
           return (
-            <div key={i} className={'bubble-row ' + (it.role === 'user' ? 'right' : 'left')}>
+            <div key={i} className={'msg-row ' + (it.role === 'user' ? 'right' : 'left')}>
+              {it.role === 'bot' && <div className="avatar">🤖</div>}
               <div className={'bubble ' + (it.role === 'user' ? 'user' : 'bot')}>
                 {it.role === 'bot' ? <FormattedText text={it.text} /> : it.text}
               </div>
             </div>
           );
         })}
-        {typing ? (
-          <div className="bubble-row left">
-            <div className="bubble bot dots"><span></span><span></span><span></span></div>
+        {typing && (
+          <div className="msg-row left">
+            <div className="avatar">🤖</div>
+            <div className="bubble bot typing">
+              <div className="typing-dots"><span/><span/><span/></div>
+              {status && <span className="status-label">{status}</span>}
+            </div>
           </div>
-        ) : null}
+        )}
         <div ref={endRef} />
       </main>
 
@@ -258,12 +268,21 @@ export default function App() {
             onChange={e => setInput(e.target.value)}
             onKeyDown={onKey}
             rows={1}
-            placeholder="Type your registered site name or CID — e.g. 'Meticulous Tanzania' or 'LTZ1900201'"
+            placeholder="Site name or CID — e.g. 'Meticulous Tanzania' or 'LTZ1900201'"
           />
-          <button className={'mic ' + (listening ? 'on' : '')} onClick={onMic} aria-label="mic">🎙</button>
-          <button className="send" onClick={() => send()} aria-label="send">➤</button>
+          <button
+            className={'composer-btn btn-mic' + (listening ? ' recording' : '')}
+            onClick={onMic}
+            aria-label="voice input"
+          >🎙</button>
+          <button
+            className="composer-btn btn-send"
+            onClick={() => send()}
+            disabled={typing || !input.trim()}
+            aria-label="send"
+          >➤</button>
         </div>
-        <p className="hint">Press Enter to send · Shift+Enter for newline · Click mic to speak</p>
+        <p className="hint">Enter to send · Shift+Enter for newline · Click 🎙 to speak</p>
       </div>
     </div>
   );

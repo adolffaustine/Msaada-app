@@ -73,6 +73,9 @@ def search(query: str, limit: int = 10):
     return data.get("results", []) if isinstance(data, dict) else []
 
 
+DIAGNOSIS_TIMEOUT = float(os.environ.get("DIAGNOSIS_TIMEOUT_SECONDS", "90"))
+
+
 def diagnose(interface_name=None, link_type=None, ip_address=None):
     normalized = (link_type or "").upper()
     path = DIAGNOSIS_ENDPOINT_BY_TYPE.get(normalized, "/diagnosis")
@@ -80,10 +83,10 @@ def diagnose(interface_name=None, link_type=None, ip_address=None):
     if is_ftth:
         if not ip_address:
             raise ValueError("ipAddress is required for FTTH/GPON")
-        return _authed_request("POST", path, body={"ip": ip_address}, timeout=240.0)
+        return _authed_request("POST", path, body={"ip": ip_address}, timeout=DIAGNOSIS_TIMEOUT)
     if not interface_name:
         raise ValueError("interfaceName is required")
-    return _authed_request("POST", path, body={"interfaceName": interface_name}, timeout=240.0)
+    return _authed_request("POST", path, body={"interfaceName": interface_name}, timeout=DIAGNOSIS_TIMEOUT)
 
 
 def summarize_search_results(results):
