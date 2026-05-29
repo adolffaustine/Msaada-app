@@ -177,10 +177,25 @@ async def run_turn(history, user_message, tool_handler, max_iters=8):
     history is a list of {"role": "user"|"assistant", "content": str|list} messages
     stored in Anthropic's native format.
     """
+
+    import vectorstore
+    # Retrieve similar past prompts/responses for retrieval-augmented context
+    similar = vectorstore.search(user_message, k=3, min_score=0.65)
+    retrieval_context = ""
+    if similar:
+        retrieval_context = "\n\n---\nRelevant past cases (for reference only):\n"
+        for hit in similar:
+            meta = hit.get("metadata", {})
+            src = meta.get("source", "")
+            retrieval_context += f"[{src}] {hit['text']}\n"
+
     messages = []
     for m in history or []:
         if m.get("role") in ("user", "assistant"):
             messages.append({"role": m["role"], "content": m["content"]})
+    # Inject retrieval context before the user message
+    if retrieval_context:
+        messages.append({"role": "user", "content": retrieval_context})
     messages.append({"role": "user", "content": user_message})
 
     card = {"chart": None, "ticket": None}

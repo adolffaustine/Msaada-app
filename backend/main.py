@@ -135,8 +135,38 @@ async def api_chat(req: Request):
         raise HTTPException(400, "empty message")
 
     sess = get_session(sid)
+
+    # Store the user prompt in the vectorstore for learning
+    try:
+        vectorstore.add(
+            doc_id=f"prompt-{sid}-{int(time.time())}",
+            text=message,
+            metadata={
+                "sessionId": sid,
+                "ts": int(time.time()),
+                "source": "user_prompt"
+            }
+        )
+    except Exception as e:
+        print("vectorstore prompt add error:", e)
+
     try:
         reply, history, card = await run_turn(sess["history"], message, _tool_handler)
+
+        # Store the assistant's response in the vectorstore for learning
+        try:
+            vectorstore.add(
+                doc_id=f"response-{sid}-{int(time.time())}",
+                text=reply,
+                metadata={
+                    "sessionId": sid,
+                    "ts": int(time.time()),
+                    "source": "assistant_response"
+                }
+            )
+        except Exception as e:
+            print("vectorstore response add error:", e)
+
         sess["history"] = _trim_history(history)
         sess["lastSeen"] = int(time.time())
         save_session(sid, sess)
