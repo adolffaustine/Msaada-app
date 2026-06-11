@@ -2,9 +2,10 @@
 import os, json, time, uuid
 from pathlib import Path
 from typing import Optional
+import asyncio
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 # from ollama_chat import run_turn
 from claude_chat import run_turn,visible_history
@@ -52,12 +53,14 @@ def _tool_handler(name: str, args: dict, card: dict) -> dict:
             ip_address=args.get("ipAddress"),
         )
         summary, chart = summarize_diagnosis(raw, capacity_mbps=args.get("capacityMbps"))
-        card["chart"] = {
-            "interface": args.get("interfaceName") or args.get("ipAddress"),
-            "capacity_mbps": args.get("capacityMbps"),
-            "sent_mbps": chart["sent_mbps"],
-            "recv_mbps": chart["recv_mbps"],
-        }
+        link_type = (args.get("linkType") or "").upper()
+        if link_type not in ("FTTH", "GPON"):
+            card["chart"] = {
+                "interface": args.get("interfaceName") or args.get("ipAddress"),
+                "capacity_mbps": args.get("capacityMbps"),
+                "sent_mbps": chart["sent_mbps"],
+                "recv_mbps": chart["recv_mbps"],
+            }
         return summary
 
     if name == "log_ticket":
@@ -102,6 +105,27 @@ def _tool_handler(name: str, args: dict, card: dict) -> dict:
     return {"error": f"unknown tool {name}"}
 
 
+def _trim_history(history, max_messages: int = 50) -> list:
+    """Slice history to max_messages and drop any leading tool_result messages.
+
+    Anthropic requires every tool_result block to be preceded by an assistant
+    message containing the matching tool_use block.  A naive [-50:] slice can
+    cut off the tool_use while keeping the tool_result, causing a 400 error.
+    """
+    h = history[-max_messages:]
+    while h:
+        first = h[0]
+        content = first.get("content")
+        # A user message whose content is a list of tool_result blocks has no
+        # matching tool_use above it after the slice — drop it.
+        if first.get("role") == "user" and isinstance(content, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                h = h[1:]
+                continue
+        break
+    return h
+
+
 @app.post("/api/chat")
 async def api_chat(req: Request):
     body = await req.json()
@@ -111,15 +135,105 @@ async def api_chat(req: Request):
         raise HTTPException(400, "empty message")
 
     sess = get_session(sid)
+
+    # Store the user prompt in the vectorstore for learning
     try:
-        reply, history, card = run_turn(sess["history"], message, _tool_handler)
-        sess["history"] = history[-50:]
+        vectorstore.add(
+            doc_id=f"prompt-{sid}-{int(time.time())}",
+            text=message,
+            metadata={
+                "sessionId": sid,
+                "ts": int(time.time()),
+                "source": "user_prompt"
+            }
+        )
+    except Exception as e:
+        print("vectorstore prompt add error:", e)
+
+    try:
+        reply, history, card = await run_turn(sess["history"], message, _tool_handler)
+
+        # Store the assistant's response in the vectorstore for learning
+        try:
+            vectorstore.add(
+                doc_id=f"response-{sid}-{int(time.time())}",
+                text=reply,
+                metadata={
+                    "sessionId": sid,
+                    "ts": int(time.time()),
+                    "source": "assistant_response"
+                }
+            )
+        except Exception as e:
+            print("vectorstore response add error:", e)
+
+        sess["history"] = _trim_history(history)
         sess["lastSeen"] = int(time.time())
         save_session(sid, sess)
         return {"sessionId": sid, "reply": reply, "card": card}
     except Exception as e:
         print("chat error:", e)
         raise HTTPException(500, str(e))
+
+
+_TOOL_STATUS = {
+    "search_customer": "Searching for your account...",
+    "run_diagnosis": "Running live diagnosis on your link — please wait...",
+    "log_ticket": "Logging your support ticket...",
+    "recall_similar_cases": "Checking similar past cases...",
+}
+
+
+@app.post("/api/chat/stream")
+async def api_chat_stream(req: Request):
+    body = await req.json()
+    sid = body.get("sessionId") or str(uuid.uuid4())
+    message = (body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(400, "empty message")
+
+    sess = get_session(sid)
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+
+    async def _streaming_tool_handler(name: str, args: dict, card: dict) -> dict:
+        if name in _TOOL_STATUS:
+            await queue.put({"type": "status", "text": _TOOL_STATUS[name]})
+        return await asyncio.to_thread(_tool_handler, name, args, card)
+
+    result: dict = {}
+
+    async def _run():
+        try:
+            reply, history, card = await run_turn(sess["history"], message, _streaming_tool_handler)
+            result.update(reply=reply, history=history, card=card)
+        except Exception as e:
+            result["error"] = str(e)
+            print("chat stream error:", e)
+        finally:
+            await queue.put(_DONE)
+
+    async def generate():
+        asyncio.create_task(_run())
+        while True:
+            event = await queue.get()
+            if event is _DONE:
+                break
+            yield f"data: {json.dumps(event)}\n\n"
+
+        if "error" in result:
+            yield f"data: {json.dumps({'type': 'error', 'message': result['error']})}\n\n"
+        else:
+            sess["history"] = _trim_history(result["history"])
+            sess["lastSeen"] = int(time.time())
+            save_session(sid, sess)
+            yield f"data: {json.dumps({'type': 'done', 'sessionId': sid, 'reply': result['reply'], 'card': result['card']})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/history")
